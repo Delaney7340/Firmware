@@ -36,7 +36,7 @@ px4_add_module(
 	PRIORITY
 		"SCHED_PRIORITY_MAX - 16" # max priority below high priority WQ threads
 	SRCS
-		top.c
+		top.cpp
 	DEPENDS
 		systemlib
 )

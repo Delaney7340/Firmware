@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2015 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2015-2020 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,7 +32,7 @@
  ****************************************************************************/
 
 /**
- * @file printload.c
+ * @file print_load.cpp
  *
  * Print the current system load.
  *
@@ -42,8 +42,8 @@
 #include <string.h>
 #include <stdio.h>
 
-#include <systemlib/cpuload.h>
-#include <systemlib/printload.h>
+#include <px4_platform/cpuload.h>
+#include <px4_platform_common/printload.h>
 #include <drivers/drv_hrt.h>
 
 #if defined(BOARD_DMA_ALLOC_POOL_SIZE)
@@ -66,7 +66,6 @@ extern struct system_load_s system_load;
 
 void init_print_load_s(uint64_t t, struct print_load_s *s)
 {
-
 	s->total_user_time = 0;
 
 	s->running_count = 0;
@@ -79,11 +78,10 @@ void init_print_load_s(uint64_t t, struct print_load_s *s)
 		s->last_times[i] = 0;
 	}
 
-	s->interval_time_ms_inv = 0.f;
+	s->interval_time_us_inv = 0.f;
 }
 
-static const char *
-tstate_name(const tstate_t s)
+static constexpr const char *tstate_name(const tstate_t s)
 {
 	switch (s) {
 	case TSTATE_TASK_INVALID:
@@ -135,7 +133,6 @@ void print_load_buffer(uint64_t t, char *buffer, int buffer_length, print_load_c
 #pragma GCC diagnostic ignored "-Wformat-extra-args"
 	print_state->new_time = t;
 
-	int   i;
 	uint64_t curr_time_us;
 	uint64_t idle_time_us;
 	float idle_load = 0.f;
@@ -144,7 +141,7 @@ void print_load_buffer(uint64_t t, char *buffer, int buffer_length, print_load_c
 	idle_time_us = system_load.tasks[0].total_runtime;
 
 	if (print_state->new_time > print_state->interval_start_time) {
-		print_state->interval_time_ms_inv = 1.f / ((float)((print_state->new_time - print_state->interval_start_time) / 1000));
+		print_state->interval_time_us_inv = 1.f / static_cast<float>(print_state->new_time - print_state->interval_start_time);
 
 		/* header for task list */
 		snprintf(buffer, buffer_length, "%4s %-*s %8s %6s %11s %10s %-5s %2s",
@@ -170,13 +167,13 @@ void print_load_buffer(uint64_t t, char *buffer, int buffer_length, print_load_c
 	print_state->total_user_time = 0;
 
 	// create a copy of the runtimes because this could be updated during the print output
-	uint32_t total_runtime[CONFIG_MAX_TASKS];
+	uint64_t total_runtime[CONFIG_MAX_TASKS];
 
-	for (i = 0; i < CONFIG_MAX_TASKS; i++) {
-		total_runtime[i] = (uint32_t)(system_load.tasks[i].total_runtime / 1000);
+	for (int i = 0; i < CONFIG_MAX_TASKS; i++) {
+		total_runtime[i] = system_load.tasks[i].total_runtime;
 	}
 
-	for (i = 0; i < CONFIG_MAX_TASKS; i++) {
+	for (int i = 0; i < CONFIG_MAX_TASKS; i++) {
 
 		sched_lock(); // need to lock the tcb access (but make it as short as possible)
 
@@ -213,8 +210,8 @@ void print_load_buffer(uint64_t t, char *buffer, int buffer_length, print_load_c
 #if CONFIG_RR_INTERVAL > 0
 		unsigned tcb_timeslice = system_load.tasks[i].tcb->timeslice;
 #endif
-		unsigned tcb_task_state = system_load.tasks[i].tcb->task_state;
-		unsigned tcb_sched_priority = system_load.tasks[i].tcb->sched_priority;
+		tstate_t tcb_task_state = (tstate_t)system_load.tasks[i].tcb->task_state;
+		uint8_t tcb_sched_priority = system_load.tasks[i].tcb->sched_priority;
 
 		unsigned int tcb_num_used_fds = 0; // number of used file descriptors
 #if CONFIG_NFILE_DESCRIPTORS > 0
@@ -255,17 +252,29 @@ void print_load_buffer(uint64_t t, char *buffer, int buffer_length, print_load_c
 		case TSTATE_WAIT_SEM:
 			print_state->blocked_count++;
 			break;
+
+		case TSTATE_TASK_STOPPED:
+			// DO NOTHING
+			break;
+
+		case NUM_TASK_STATES:
+			// DO NOTHING
+			break;
 		}
 
-		interval_runtime = (print_state->last_times[i] > 0 && total_runtime[i] > print_state->last_times[i])
-				   ? (total_runtime[i] - print_state->last_times[i]) : 0;
+		if (print_state->last_times[i] > 0 && total_runtime[i] > print_state->last_times[i]) {
+			interval_runtime = total_runtime[i] - print_state->last_times[i];
+
+		} else {
+			interval_runtime = 0;
+		}
 
 		print_state->last_times[i] = total_runtime[i];
 
 		float current_load = 0.f;
 
 		if (print_state->new_time > print_state->interval_start_time) {
-			current_load = interval_runtime * print_state->interval_time_ms_inv;
+			current_load = interval_runtime * print_state->interval_time_us_inv;
 
 			if (tcb_pid != 0) {
 				print_state->total_user_time += interval_runtime;
@@ -273,7 +282,6 @@ void print_load_buffer(uint64_t t, char *buffer, int buffer_length, print_load_c
 			} else {
 				idle_load = current_load;
 			}
-
 		}
 
 
@@ -282,12 +290,11 @@ void print_load_buffer(uint64_t t, char *buffer, int buffer_length, print_load_c
 		}
 
 		// print output
-		int print_len = snprintf(buffer, buffer_length, "%4d %-*s %8d %2d.%03d %5u/%5u %3u (%3u) ",
+		int print_len = snprintf(buffer, buffer_length, "%4d %-*s %8d %6.3f %5u/%5u %3u (%3u) ",
 					 tcb_pid,
 					 CONFIG_TASK_NAME_SIZE, tcb_name,
-					 total_runtime[i],
-					 (int)(current_load * 100.0f),
-					 (int)((current_load * 100.0f - (int)(current_load * 100.0f)) * 1000),
+					 total_runtime[i] / 1000, // us -> ms
+					 (double)current_load * 100,
 					 stack_size - stack_free,
 					 stack_size,
 					 tcb_sched_priority,
@@ -318,7 +325,7 @@ void print_load_buffer(uint64_t t, char *buffer, int buffer_length, print_load_c
 	float task_load;
 	float sched_load;
 
-	task_load = (float)(print_state->total_user_time) * print_state->interval_time_ms_inv;
+	task_load = (float)(print_state->total_user_time) * print_state->interval_time_us_inv;
 
 	/* this can happen if one tasks total runtime was not computed
 	   correctly by the scheduler instrumentation TODO */
@@ -371,11 +378,11 @@ struct print_load_callback_data_s {
 
 static void print_load_callback(void *user)
 {
-	char *clear_line = "";
+	char clear_line[] {CL};
 	struct print_load_callback_data_s *data = (struct print_load_callback_data_s *)user;
 
-	if (data->fd == 1) {
-		clear_line = CL;
+	if (data->fd != 1) {
+		memset(clear_line, 0, sizeof(clear_line));
 	}
 
 	dprintf(data->fd, "%s%s\n", clear_line, data->buffer);
